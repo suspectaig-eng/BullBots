@@ -6,12 +6,20 @@ that reality — it shows real season stats, recent form, scoring margins,
 and home/away splits, then gives a probability that’s capped at 95% so it
 never pretends to certainty it doesn’t have.
 What it does
-	•	/predict Lakers vs Celtics — NBA prediction with full stats breakdown
+	•	/predict Lakers vs Celtics — NBA prediction with full stats breakdown + head-to-head history
 	•	/predict Gonzaga vs Duke ncaa — other leagues (see below)
+	•	/live — today’s NBA games with live scores and final results
 	•	/leagues — list supported league codes
 	•	Output includes: win probability, projected score, season record,
-points for/against, last-10 form, home/away splits, and the model’s
-reasoning factors.
+points for/against, last-10 form, home/away splits, head-to-head
+record over recent seasons, and the model’s reasoning factors.
+On accuracy: there’s no way to guarantee a fixed hit rate (like “8 out
+of 10”) on future games — that would mean claiming knowledge of outcomes
+before they happen. What head-to-head data does reliably add is context:
+some matchups have real patterns (a team that consistently struggles
+against a specific opponent’s style, regardless of overall record), and
+factoring that in makes the model’s reasoning more complete, even though
+no probability estimate is a promise.
 1. Get a Telegram bot token
 	1.	Open Telegram, message @BotFather
 	2.	Send /newbot, follow the prompts, copy the token it gives you
