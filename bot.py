@@ -1,5 +1,5 @@
 """
-HoopsBot — Telegram basketball prediction bot
+BullBot — Telegram basketball prediction bot
 ================================================
 Gives a realistic, data-backed prediction (win probability, projected
 score, and a full stats breakdown) instead of fake "99% accurate" picks.
@@ -41,8 +41,13 @@ logger = logging.getLogger("hoopsbot")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY")  # optional, for non-NBA leagues
+BALLDONTLIE_API_KEY = os.environ.get("BALLDONTLIE_API_KEY")  # required, free — see README.md
 
 BALLDONTLIE_BASE = "https://api.balldontlie.io/v1"
+
+
+def _bdl_headers():
+    return {"Authorization": BALLDONTLIE_API_KEY} if BALLDONTLIE_API_KEY else {}
 APIBASKETBALL_BASE = "https://api-basketball.p.rapidapi.com"
 
 LEAGUE_HELP = (
@@ -95,6 +100,22 @@ class Prediction:
     proj_score_a: float
     proj_score_b: float
     factors: dict = field(default_factory=dict)
+    h2h: "H2HStats | None" = None
+
+
+@dataclass
+class H2HStats:
+    games_checked: int = 0
+    a_wins: int = 0
+    b_wins: int = 0
+    a_avg_pts: float = 0.0
+    b_avg_pts: float = 0.0
+    last_meeting: str | None = None
+    last_meeting_result: str | None = None
+
+    @property
+    def a_win_pct(self) -> float | None:
+        return (self.a_wins / self.games_checked) if self.games_checked else None
 
 
 # --------------------------------------------------------------------------
@@ -102,7 +123,7 @@ class Prediction:
 # --------------------------------------------------------------------------
 
 def _bdl_find_team(name: str) -> dict | None:
-    resp = requests.get(f"{BALLDONTLIE_BASE}/teams", timeout=10)
+    resp = requests.get(f"{BALLDONTLIE_BASE}/teams", headers=_bdl_headers(), timeout=10)
     resp.raise_for_status()
     teams = resp.json().get("data", [])
     name_lower = name.lower()
@@ -122,6 +143,7 @@ def _bdl_team_stats(team_id: int, season: int) -> TeamStats:
         resp = requests.get(
             f"{BALLDONTLIE_BASE}/games",
             params={"seasons[]": season, "team_ids[]": team_id, "per_page": 100, "page": page},
+            headers=_bdl_headers(),
             timeout=10,
         )
         resp.raise_for_status()
@@ -165,6 +187,11 @@ def _bdl_team_stats(team_id: int, season: int) -> TeamStats:
 
 
 def get_nba_matchup(team_a_name: str, team_b_name: str, season: int | None = None) -> tuple[TeamStats, TeamStats]:
+    if not BALLDONTLIE_API_KEY:
+        raise ValueError(
+            "NBA data requires a free BALLDONTLIE_API_KEY. Get one at balldontlie.io "
+            "and add it as an environment variable. See README.md."
+        )
     season = season or (date.today().year if date.today().month >= 10 else date.today().year - 1)
     ta = _bdl_find_team(team_a_name)
     tb = _bdl_find_team(team_b_name)
@@ -177,6 +204,81 @@ def get_nba_matchup(team_a_name: str, team_b_name: str, season: int | None = Non
     stats_b = _bdl_team_stats(tb["id"], season)
     stats_b.name = tb["full_name"]
     return stats_a, stats_b
+
+
+def get_nba_h2h(team_a_id: int, team_b_id: int, team_a_name: str, team_b_name: str, seasons_back: int = 3) -> H2HStats:
+    """Pull head-to-head results between two NBA teams across recent seasons."""
+    current_season = date.today().year if date.today().month >= 10 else date.today().year - 1
+    seasons = [current_season - i for i in range(seasons_back)]
+
+    games, page = [], 1
+    while True:
+        resp = requests.get(
+            f"{BALLDONTLIE_BASE}/games",
+            params={
+                "seasons[]": seasons,
+                "team_ids[]": [team_a_id, team_b_id],
+                "per_page": 100,
+                "page": page,
+            },
+            headers=_bdl_headers(),
+            timeout=10,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        games.extend(payload.get("data", []))
+        meta = payload.get("meta", {})
+        if not meta.get("next_page"):
+            break
+        page = meta["next_page"]
+
+    # Keep only games where BOTH teams played each other, and only completed games
+    matchups = [
+        g for g in games
+        if g.get("status") == "Final"
+        and {g["home_team"]["id"], g["visitor_team"]["id"]} == {team_a_id, team_b_id}
+    ]
+    matchups.sort(key=lambda g: g["date"])
+
+    h2h = H2HStats()
+    h2h.games_checked = len(matchups)
+    a_pts, b_pts = [], []
+
+    for g in matchups:
+        a_is_home = g["home_team"]["id"] == team_a_id
+        a_score = g["home_team_score"] if a_is_home else g["visitor_team_score"]
+        b_score = g["visitor_team_score"] if a_is_home else g["home_team_score"]
+        a_pts.append(a_score)
+        b_pts.append(b_score)
+        if a_score > b_score:
+            h2h.a_wins += 1
+        else:
+            h2h.b_wins += 1
+
+    if matchups:
+        h2h.a_avg_pts = sum(a_pts) / len(a_pts)
+        h2h.b_avg_pts = sum(b_pts) / len(b_pts)
+        last = matchups[-1]
+        h2h.last_meeting = last["date"][:10]
+        last_a_is_home = last["home_team"]["id"] == team_a_id
+        last_a_score = last["home_team_score"] if last_a_is_home else last["visitor_team_score"]
+        last_b_score = last["visitor_team_score"] if last_a_is_home else last["home_team_score"]
+        winner = team_a_name if last_a_score > last_b_score else team_b_name
+        h2h.last_meeting_result = f"{winner} won {max(last_a_score, last_b_score)}-{min(last_a_score, last_b_score)}"
+
+    return h2h
+
+
+def get_nba_live_games() -> list[dict]:
+    """Today's NBA games with current status/score (live, scheduled, or final)."""
+    resp = requests.get(
+        f"{BALLDONTLIE_BASE}/games",
+        params={"dates[]": date.today().isoformat()},
+        headers=_bdl_headers(),
+        timeout=10,
+    )
+    resp.raise_for_status()
+    return resp.json().get("data", [])
 
 
 # --------------------------------------------------------------------------
@@ -271,7 +373,7 @@ def _logistic(x: float) -> float:
     return 1 / (1 + math.exp(-x))
 
 
-def predict_matchup(team_a: TeamStats, team_b: TeamStats, a_is_home: bool = True) -> Prediction:
+def predict_matchup(team_a: TeamStats, team_b: TeamStats, a_is_home: bool = True, h2h: H2HStats | None = None) -> Prediction:
     win_pct_edge = team_a.win_pct - team_b.win_pct
     form_edge = team_a.last10_pct - team_b.last10_pct
     net_rating_edge = team_a.net_rating - team_b.net_rating  # points
@@ -280,12 +382,18 @@ def predict_matchup(team_a: TeamStats, team_b: TeamStats, a_is_home: bool = True
     b_split = (team_b.away_win_pct if a_is_home else team_b.home_win_pct)
     split_edge = (a_split - b_split) if (a_split is not None and b_split is not None) else 0.0
 
-    # Scale net_rating_edge (points, roughly -20..20) to a 0-1-ish range
+    # H2H edge only counted if there's enough sample size (3+ meetings) to mean anything
+    h2h_edge = 0.0
+    if h2h and h2h.games_checked >= 3 and h2h.a_win_pct is not None:
+        h2h_edge = h2h.a_win_pct - (1 - h2h.a_win_pct)  # ranges -1..1
+
+    # Weights: win% 30%, recent form 18%, net rating 26%, home/away split 13%, H2H 13%
     score = (
-        0.35 * win_pct_edge
-        + 0.20 * form_edge
-        + 0.30 * (net_rating_edge / 20)
-        + 0.15 * split_edge
+        0.30 * win_pct_edge
+        + 0.18 * form_edge
+        + 0.26 * (net_rating_edge / 20)
+        + 0.13 * split_edge
+        + 0.13 * h2h_edge
     )
 
     # Home court adds a small, well-documented edge (~2.5-3 pts historically)
@@ -317,7 +425,9 @@ def predict_matchup(team_a: TeamStats, team_b: TeamStats, a_is_home: bool = True
             "form_edge": form_edge,
             "net_rating_edge": net_rating_edge,
             "split_edge": split_edge,
+            "h2h_edge": h2h_edge,
         },
+        h2h=h2h,
     )
 
 
@@ -347,10 +457,28 @@ def format_prediction(pred: Prediction) -> str:
         "*Home/away splits*",
         f"  {a.name} home: {a.home_win_pct*100:.1f}%" if a.home_win_pct is not None else f"  {a.name} home: n/a",
         f"  {b.name} away: {b.away_win_pct*100:.1f}%" if b.away_win_pct is not None else f"  {b.name} away: n/a",
+    ]
+
+    if pred.h2h and pred.h2h.games_checked > 0:
+        h = pred.h2h
+        lines += [
+            "",
+            "*Head-to-head (recent seasons)*",
+            f"  Record: {a.name} {h.a_wins} - {h.b_wins} {b.name} ({h.games_checked} games)",
+            f"  Avg score in matchups: {a.name} {h.a_avg_pts:.1f} — {h.b_avg_pts:.1f} {b.name}",
+        ]
+        if h.last_meeting:
+            lines.append(f"  Last meeting ({h.last_meeting}): {h.last_meeting_result}")
+    else:
+        lines += ["", "*Head-to-head*", "  No recent meetings found in the last few seasons."]
+
+    lines += [
         "",
         "_Model: weighted blend of season win%, recent form, net scoring margin, "
-        "and home/away splits, run through a capped logistic curve (never above 95%)._",
-        "_No prediction model is 99% accurate — treat this as an informed estimate, not a guarantee._",
+        "home/away splits, and head-to-head history, run through a capped logistic "
+        "curve (never above 95%)._",
+        "_No prediction model hits a fixed accuracy rate like 8/10 — treat this as an "
+        "informed estimate, not a guarantee._",
     ]
     return "\n".join(lines)
 
@@ -365,9 +493,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Usage:\n"
         "/predict Lakers vs Celtics\n"
         "/predict Barcelona vs Real Madrid euroleague\n"
+        "/live — today's NBA scores (live + final)\n"
         "/leagues — see supported leagues\n\n"
-        "This bot gives realistic probabilities (never claims 99% accuracy — "
-        "no model can back that up)."
+        "Predictions include head-to-head history. This bot gives realistic "
+        "probabilities (never claims a fixed accuracy rate — no model can back that up)."
     )
 
 
@@ -402,9 +531,17 @@ async def predict_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         if league == "nba":
+            ta_info = _bdl_find_team(team_a_raw)
+            tb_info = _bdl_find_team(team_b_raw)
+            if not ta_info or not tb_info:
+                missing = team_a_raw if not ta_info else team_b_raw
+                await update.message.reply_text(f"Could not find NBA team matching '{missing}'.")
+                return
             stats_a, stats_b = get_nba_matchup(team_a_raw, team_b_raw)
+            h2h = get_nba_h2h(ta_info["id"], tb_info["id"], stats_a.name, stats_b.name)
         else:
             stats_a, stats_b = get_other_league_matchup(league, team_a_raw, team_b_raw)
+            h2h = None
 
         if stats_a.games_played == 0 or stats_b.games_played == 0:
             await update.message.reply_text(
@@ -413,7 +550,7 @@ async def predict_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        pred = predict_matchup(stats_a, stats_b, a_is_home=True)
+        pred = predict_matchup(stats_a, stats_b, a_is_home=True, h2h=h2h)
         await update.message.reply_markdown(format_prediction(pred))
 
     except ValueError as e:
@@ -421,6 +558,41 @@ async def predict_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except requests.RequestException as e:
         logger.exception("Data source error")
         await update.message.reply_text(f"Data source error, try again shortly: {e}")
+
+
+async def live_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not BALLDONTLIE_API_KEY:
+        await update.message.reply_text(
+            "Live scores need a free BALLDONTLIE_API_KEY. See README.md."
+        )
+        return
+    try:
+        games = get_nba_live_games()
+    except requests.RequestException as e:
+        logger.exception("Live scores error")
+        await update.message.reply_text(f"Couldn't fetch live scores right now: {e}")
+        return
+
+    if not games:
+        await update.message.reply_text("No NBA games scheduled today.")
+        return
+
+    lines = ["🏀 *Today's NBA games*", ""]
+    for g in games:
+        home = g["home_team"]["full_name"]
+        away = g["visitor_team"]["full_name"]
+        status = g.get("status", "")
+        home_score = g.get("home_team_score", 0)
+        away_score = g.get("visitor_team_score", 0)
+
+        if status == "Final":
+            lines.append(f"✅ {away} {away_score} — {home_score} {home} (Final)")
+        elif status in ("1st Qtr", "2nd Qtr", "3rd Qtr", "4th Qtr", "Halftime", "OT"):
+            lines.append(f"🔴 LIVE: {away} {away_score} — {home_score} {home} ({status})")
+        else:
+            lines.append(f"🕐 {away} @ {home} — {status}")
+
+    await update.message.reply_markdown("\n".join(lines))
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -438,8 +610,9 @@ def main():
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("leagues", leagues_cmd))
     app.add_handler(CommandHandler("predict", predict_cmd))
+    app.add_handler(CommandHandler("live", live_cmd))
 
-    logger.info("HoopsBot starting...")
+    logger.info("BullBot starting...")
     app.run_polling()
 
 
