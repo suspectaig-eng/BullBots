@@ -24,6 +24,7 @@ Commands
 """
 
 import os
+import time
 import logging
 import math
 from datetime import date
@@ -48,6 +49,39 @@ BALLDONTLIE_BASE = "https://api.balldontlie.io/v1"
 
 def _bdl_headers():
     return {"Authorization": BALLDONTLIE_API_KEY} if BALLDONTLIE_API_KEY else {}
+
+
+def _bdl_get(url: str, params: dict | None = None, max_retries: int = 4) -> dict:
+    """GET with automatic retry/backoff on rate limiting (free tier is very limited)."""
+    delay = 4
+    for attempt in range(max_retries):
+        resp = requests.get(url, params=params, headers=_bdl_headers(), timeout=10)
+        if resp.status_code == 429:
+            wait = int(resp.headers.get("Retry-After", delay))
+            time.sleep(wait)
+            delay *= 2
+            continue
+        resp.raise_for_status()
+        return resp.json()
+    resp.raise_for_status()
+    return resp.json()
+
+
+_TEAM_CACHE: dict[int, list[dict]] = {}
+_TEAM_CACHE_TIME: float = 0
+_TEAM_CACHE_TTL = 3600  # teams basically never change, cache for an hour
+
+
+def _bdl_all_teams() -> list[dict]:
+    global _TEAM_CACHE_TIME
+    now = time.time()
+    if not _TEAM_CACHE or (now - _TEAM_CACHE_TIME) > _TEAM_CACHE_TTL:
+        data = _bdl_get(f"{BALLDONTLIE_BASE}/teams")
+        _TEAM_CACHE[0] = data.get("data", [])
+        _TEAM_CACHE_TIME = now
+    return _TEAM_CACHE[0]
+
+
 APIBASKETBALL_BASE = "https://api-basketball.p.rapidapi.com"
 
 LEAGUE_HELP = (
@@ -123,9 +157,7 @@ class H2HStats:
 # --------------------------------------------------------------------------
 
 def _bdl_find_team(name: str) -> dict | None:
-    resp = requests.get(f"{BALLDONTLIE_BASE}/teams", headers=_bdl_headers(), timeout=10)
-    resp.raise_for_status()
-    teams = resp.json().get("data", [])
+    teams = _bdl_all_teams()
     name_lower = name.lower()
     for t in teams:
         if (
@@ -140,19 +172,16 @@ def _bdl_find_team(name: str) -> dict | None:
 def _bdl_team_stats(team_id: int, season: int) -> TeamStats:
     games, page = [], 1
     while True:
-        resp = requests.get(
+        payload = _bdl_get(
             f"{BALLDONTLIE_BASE}/games",
             params={"seasons[]": season, "team_ids[]": team_id, "per_page": 100, "page": page},
-            headers=_bdl_headers(),
-            timeout=10,
         )
-        resp.raise_for_status()
-        payload = resp.json()
         games.extend(payload.get("data", []))
         meta = payload.get("meta", {})
         if not meta.get("next_page"):
             break
         page = meta["next_page"]
+        time.sleep(1.5)  # stay under free-tier rate limit between paged requests
 
     completed = [g for g in games if g.get("status") == "Final"]
     completed.sort(key=lambda g: g["date"])
@@ -201,19 +230,20 @@ def get_nba_matchup(team_a_name: str, team_b_name: str, season: int | None = Non
 
     stats_a = _bdl_team_stats(ta["id"], season)
     stats_a.name = ta["full_name"]
+    time.sleep(1.5)
     stats_b = _bdl_team_stats(tb["id"], season)
     stats_b.name = tb["full_name"]
     return stats_a, stats_b
 
 
-def get_nba_h2h(team_a_id: int, team_b_id: int, team_a_name: str, team_b_name: str, seasons_back: int = 3) -> H2HStats:
+def get_nba_h2h(team_a_id: int, team_b_id: int, team_a_name: str, team_b_name: str, seasons_back: int = 2) -> H2HStats:
     """Pull head-to-head results between two NBA teams across recent seasons."""
     current_season = date.today().year if date.today().month >= 10 else date.today().year - 1
     seasons = [current_season - i for i in range(seasons_back)]
 
     games, page = [], 1
     while True:
-        resp = requests.get(
+        payload = _bdl_get(
             f"{BALLDONTLIE_BASE}/games",
             params={
                 "seasons[]": seasons,
@@ -221,16 +251,13 @@ def get_nba_h2h(team_a_id: int, team_b_id: int, team_a_name: str, team_b_name: s
                 "per_page": 100,
                 "page": page,
             },
-            headers=_bdl_headers(),
-            timeout=10,
         )
-        resp.raise_for_status()
-        payload = resp.json()
         games.extend(payload.get("data", []))
         meta = payload.get("meta", {})
         if not meta.get("next_page"):
             break
         page = meta["next_page"]
+        time.sleep(1.5)
 
     # Keep only games where BOTH teams played each other, and only completed games
     matchups = [
@@ -271,14 +298,11 @@ def get_nba_h2h(team_a_id: int, team_b_id: int, team_a_name: str, team_b_name: s
 
 def get_nba_live_games() -> list[dict]:
     """Today's NBA games with current status/score (live, scheduled, or final)."""
-    resp = requests.get(
+    payload = _bdl_get(
         f"{BALLDONTLIE_BASE}/games",
         params={"dates[]": date.today().isoformat()},
-        headers=_bdl_headers(),
-        timeout=10,
     )
-    resp.raise_for_status()
-    return resp.json().get("data", [])
+    return payload.get("data", [])
 
 
 # --------------------------------------------------------------------------
@@ -538,6 +562,7 @@ async def predict_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"Could not find NBA team matching '{missing}'.")
                 return
             stats_a, stats_b = get_nba_matchup(team_a_raw, team_b_raw)
+            time.sleep(1.5)
             h2h = get_nba_h2h(ta_info["id"], tb_info["id"], stats_a.name, stats_b.name)
         else:
             stats_a, stats_b = get_other_league_matchup(league, team_a_raw, team_b_raw)
@@ -612,7 +637,7 @@ def main():
     app.add_handler(CommandHandler("predict", predict_cmd))
     app.add_handler(CommandHandler("live", live_cmd))
 
-    logger.info("BullBot starting...")
+    logger.info("HoopsBot starting...")
     app.run_polling()
 
 
