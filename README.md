@@ -1,26 +1,29 @@
-BullBot — Telegram Basketball Prediction Bot
-A note up front: no bot can predict 99% of basketball games correctly.
-Even the best sports analytics firms and sportsbooks land around 65-75% on
-straight win/loss picks. This bot is built to be genuinely useful within
-that reality — it shows real season stats, recent form, scoring margins,
-and home/away splits, then gives a probability that’s capped at 95% so it
-never pretends to certainty it doesn’t have.
+FootyBot
+A Telegram bot for football (soccer) predictions, live scores, and
+accumulator booking codes — built on real data, with honest probabilities
+instead of fixed “accuracy” claims.
 What it does
-	•	/predict Lakers vs Celtics — NBA prediction with full stats breakdown + head-to-head history
-	•	/predict Gonzaga vs Duke ncaa — other leagues (see below)
-	•	/live — today’s NBA games with live scores and final results
-	•	/leagues — list supported league codes
-	•	Output includes: win probability, projected score, season record,
-points for/against, last-10 form, home/away splits, head-to-head
-record over recent seasons, and the model’s reasoning factors.
-On accuracy: there’s no way to guarantee a fixed hit rate (like “8 out
-of 10”) on future games — that would mean claiming knowledge of outcomes
-before they happen. What head-to-head data does reliably add is context:
-some matchups have real patterns (a team that consistently struggles
-against a specific opponent’s style, regardless of overall record), and
-factoring that in makes the model’s reasoning more complete, even though
-no probability estimate is a promise.
-1. Get a Telegram bot token
-	1.	Open Telegram, message @BotFather
-	2.	Send /newbot, follow the prompts, copy the token it gives you
-2. Set up the code
+	•	/predict Team A vs Team B — probability breakdown (win/draw/win) built
+from recent form, goal rates, and head-to-head history, cross-checked
+against API-Football’s own prediction model
+	•	/stats — expands the numbers behind your last prediction
+	•	/live — live scores right now, or today’s finished results if nothing’s live
+	•	/leagues <name> — look up a league to disambiguate a /predict call
+	•	/combo → /addleg → /finish — build a 2-5 leg accumulator, get
+combined odds and the honest combined probability (which drops fast
+as you add legs)
+	•	/code ABC123 — anyone can pull up a shared booking slip by code
+Setup
+1. Telegram bot token
+You already have this from @BotFather.
+2. API-Football key
+This bot uses API-Football (by API-Sports)
+for teams, fixtures, stats, and live scores.
+	•	Free tier: sign up at api-football.com or via
+RapidAPI — 100
+requests/day free, enough to develop and test with.
+	•	Paid tiers start around $10-40/month once you want higher request
+volume (e.g. serving many users’ /live calls).
+Two ways to authenticate — pick one:
+Direct (api-sports.io) — sign up at api-football.com, key comes from
+your dashboard:
